@@ -22,3 +22,21 @@ data/processed/*
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# ==========================================
+# V2 Pipeline Upgrades (Added today)
+# ==========================================
+
+# Ignore the heavy local data staging zip
+dataset.zip
+temp_dataset.zip
+
+# Ignore the local dataset extraction folder created by Notebook 06
+local_dataset/
+
+# Ignore the weights directory (even though *.pth is caught, this keeps the folder clean)
+weights/
+!weights/.gitkeep
+
+# Ignore any potential Colab/Jupyter temporary execution logs
+*.log

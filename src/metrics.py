@@ -1,9 +1,11 @@
+import os
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, auc
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc, confusion_matrix, classification_report
 from sklearn.preprocessing import label_binarize
 
 def plot_multiclass_roc_auc(all_labels, all_probs, classes=['No Sub', 'CDM', 'Vortex'], save_path=None):
-    #Generates and saves a professional multi-class ROC Curve.
+    """Generates and saves a professional multi-class ROC Curve."""
     y_test_bin = label_binarize(all_labels, classes=[0, 1, 2])
     n_classes = y_test_bin.shape[1]
 
@@ -29,5 +31,38 @@ def plot_multiclass_roc_auc(all_labels, all_probs, classes=['No Sub', 'CDM', 'Vo
     plt.grid(alpha=0.3)
     
     if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
-    plt.show()
+    
+    # Close plot to free up memory on the remote GPU backend
+    plt.close()
+
+def save_confusion_matrix(y_true, y_pred, classes=['No Sub', 'CDM', 'Vortex'], save_path=None, title='Confusion Matrix', cmap='Blues'):
+    """
+    Generates and saves a production-grade confusion matrix.
+    Automatically handles directory creation and memory management.
+    """
+    cm = confusion_matrix(y_true, y_pred)
+    
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap=cmap, xticklabels=classes, yticklabels=classes)
+    plt.title(title)
+    plt.ylabel('True Physics Label')
+    plt.xlabel('AI Predicted Label')
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    
+    plt.close()
+
+def generate_classification_report(y_true, y_pred, classes=['No Sub', 'CDM', 'Vortex']):
+    """
+    Prints a cleanly formatted classification report to the console.
+    """
+    print("\n" + "="*50)
+    print(f" EVALUATION REPORT ")
+    print("="*50)
+    report = classification_report(y_true, y_pred, target_names=classes)
+    print(report)
+    return report
