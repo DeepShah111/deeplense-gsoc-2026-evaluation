@@ -447,23 +447,6 @@ The fusion head is initialised to mimic the 50/50 average (good starting point),
 - ML4SCI DeepLense GitHub: https://github.com/ML4SCI/DeepLense
 - escnn library: https://github.com/QUVA-Lab/escnn
 
----
-
-## Bugs Fixed vs Original Submission
-
-| # | Severity | File | Bug | Fix Applied |
-|---|---|---|---|---|
-| 1 | **Critical** | All notebooks | `get_dataloaders()` returned 4 values, all notebooks unpacked 4 — crashed before training | Signature updated to 6-tuple, all notebooks updated |
-| 2 | **Critical** | `05_Inference_Ensemble` | `freeze=True` parameter renamed to `freeze_base=True` in upgraded ensemble — `TypeError` crash | Updated to `freeze_base=True` |
-| 3 | **Critical** | `07_EquivariantCNN` | Notebook installed `e2cnn` but `models.py` requires `escnn` — `ImportError` before training | NB07 updated to install and import `escnn` |
-| 4 | **Significant** | `05_Inference_Ensemble` | Upgraded ensemble returns logits but NB05 passed them directly to ROC-AUC (needs probabilities) — invalid AUC values | Added `F.softmax()` before probability accumulation |
-| 5 | **Significant** | All notebooks | `f1_macro: 0.0` hardcoded in all result dicts — metrics table showed zeros everywhere | Captured `report = generate_classification_report(...)` and used `report['f1_macro']` |
-| 6 | **Quality** | `07_EquivariantCNN` | TTA used `TF.rotate()` (bilinear interpolation) — artefacts inflated TTA drop measurement | Replaced with `torch.rot90()` — pixel-exact rotation, zero artefacts |
-| 7 | **Quality** | `06_Pipeline_Execution` | All result dicts hardcoded — NB06 goes out of sync silently when any notebook is re-run | Each notebook saves JSON to `results/`, NB06 auto-loads all JSONs |
-| 8 | **Quality** | `train.py` | `import wandb` at top level — crash if wandb not installed | Added `try/except` with `WANDB_AVAILABLE` guard |
-| 9 | **Quality** | `train.py` | Deprecated `torch.cuda.amp.GradScaler` API | Updated to `torch.amp.GradScaler(device='cuda')` |
-
----
 
 <p align="center">
   Built as a GSoC 2026 evaluation test and portfolio project demonstrating physics-informed ML, controlled experimental design, and production ML engineering.<br/>
