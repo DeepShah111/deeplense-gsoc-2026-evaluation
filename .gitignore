@@ -40,3 +40,14 @@ weights/
 
 # Ignore any potential Colab/Jupyter temporary execution logs
 *.log
+
+# Secrets
+.env
+*.env
+
+# WandB local logs
+wandb/
+
+# Colab temporary files
+*.ipynb_checkpoints/
+.config/
