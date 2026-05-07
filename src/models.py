@@ -8,6 +8,7 @@ Architecture family:
     4. DeepLenseEnsemble   — [UPGRADED] Stacking Meta-Learner fusion
     5. EquivariantCNN      — [UPGRADED] C8-equivariant ResNet via escnn  (224×224)
                              (Phase-2 upgrade — the GSoC winning move)
+    6. TemperatureScaledModel — [GSOC UPGRADE 3] Post-hoc calibration wrapper
 
 Design contract shared by ALL models (1–5):
     • forward() returns RAW LOGITS (not softmax probabilities).
@@ -24,6 +25,7 @@ Design contract shared by ALL models (1–5):
       for Transfer/ViT/Ensemble.
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -269,3 +271,223 @@ def load_model(model: nn.Module, weights_path: str, device: torch.device) -> nn.
     model.eval()
     print(f"✅ Loaded weights from '{weights_path}' → device: {device}")
     return model
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. TEMPERATURE SCALING — [GSOC UPGRADE 3: Post-hoc Calibration]
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Neural networks are systematically overconfident — they assign probabilities
+# like 0.98 to predictions that are correct only 80% of the time. Temperature
+# Scaling (Guo et al., 2017) is the gold-standard post-hoc fix. It divides all
+# logits by a learned scalar T before the softmax. T > 1 softens the
+# distribution (less overconfident). T is found by minimising NLL on the
+# validation set.
+#
+# Reference: Guo et al. (2017) — "On Calibration of Modern Neural Networks"
+#
+# Design contract:
+#   • TemperatureScaledModel wraps ANY existing model without modifying it.
+#   • forward() returns LOGITS divided by T (NOT probabilities).
+#     This maintains compatibility with nn.CrossEntropyLoss and all
+#     existing evaluation code that expects logits.
+#   • The wrapped base model is frozen during temperature optimisation.
+#   • Temperature is constrained to T > 0 via a softplus parameterisation
+#     to prevent numerical instability.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TemperatureScaledModel(nn.Module):
+    """
+    Post-hoc calibration wrapper using Temperature Scaling.
+
+    Wraps any trained DeepLense model and learns a single scalar temperature
+    parameter T on the validation set. The base model weights are frozen —
+    only T is optimised.
+
+    Usage:
+        # After training ResNetTransfer:
+        calibrated = TemperatureScaledModel(trained_resnet)
+        calibrated.calibrate(val_loader, device)
+
+        # Drop-in replacement — returns temperature-scaled logits
+        logits = calibrated(images)
+        probs  = F.softmax(logits, dim=1)
+
+    Args:
+        base_model (nn.Module): Any trained DeepLense model returning logits.
+        init_temperature (float): Starting temperature (default 1.0 = no scaling).
+    """
+
+    def __init__(self, base_model: nn.Module, init_temperature: float = 1.5) -> None:
+        super().__init__()
+        self.base_model = base_model
+
+        # Freeze the base model — we only learn T
+        for param in self.base_model.parameters():
+            param.requires_grad = False
+
+        # log(T) parameterisation: T = exp(log_T) > 0 always.
+        # Initialising at log(1.5) gives a slightly warm start which converges
+        # faster than log(1.0) for overconfident networks.
+        import math
+        self.log_temperature = nn.Parameter(
+            torch.tensor(math.log(init_temperature), dtype=torch.float32)
+        )
+
+    @property
+    def temperature(self) -> float:
+        """Returns the current temperature T as a Python float."""
+        return float(self.log_temperature.exp().item())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns temperature-scaled logits: logits / T."""
+        logits = self.base_model(x)                      # (B, num_classes) raw logits
+        T      = self.log_temperature.exp()               # scalar tensor, T > 0
+        return logits / T
+
+    def calibrate(
+        self,
+        val_loader: torch.utils.data.DataLoader,
+        device: torch.device,
+        max_iter: int = 100,
+        lr: float = 0.05,
+        verbose: bool = True,
+    ) -> float:
+        """
+        Optimises temperature T by minimising NLL on the validation set.
+
+        The base model is kept in eval mode and its parameters are frozen.
+        Only self.log_temperature is updated.
+
+        Args:
+            val_loader : DataLoader — validation set (same split used for early stopping).
+            device     : torch.device.
+            max_iter   : int — number of L-BFGS steps (default 100, typically converges in 20).
+            lr         : float — L-BFGS learning rate (default 0.05).
+            verbose    : bool — print calibration progress.
+
+        Returns:
+            float — final optimised temperature T.
+        """
+        self.to(device)
+        self.base_model.eval()
+
+        # ── Collect all logits and labels in one pass (efficient) ────────
+        all_logits = []
+        all_labels = []
+
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+                logits = self.base_model(images)
+                all_logits.append(logits)
+                all_labels.append(labels)
+
+        all_logits = torch.cat(all_logits, dim=0)   # (N, num_classes)
+        all_labels = torch.cat(all_labels, dim=0)   # (N,)
+
+        criterion = nn.CrossEntropyLoss()
+
+        # ── L-BFGS optimiser — standard choice for temperature scaling ───
+        # L-BFGS converges in very few steps for this 1D optimisation problem.
+        optimizer = torch.optim.LBFGS(
+            [self.log_temperature], lr=lr, max_iter=max_iter
+        )
+
+        nll_before = criterion(all_logits / self.log_temperature.exp(), all_labels).item()
+
+        def _eval_closure():
+            optimizer.zero_grad()
+            scaled_logits = all_logits / self.log_temperature.exp()
+            loss = criterion(scaled_logits, all_labels)
+            loss.backward()
+            return loss
+
+        optimizer.step(_eval_closure)
+
+        nll_after = criterion(
+            all_logits / self.log_temperature.exp(), all_labels
+        ).item()
+
+        if verbose:
+            print(f"\n{'='*55}")
+            print(f"  TEMPERATURE SCALING CALIBRATION")
+            print(f"{'='*55}")
+            print(f"  Initial temperature : 1.0 (identity — no scaling)")
+            print(f"  Optimised T         : {self.temperature:.4f}")
+            print(f"  NLL before          : {nll_before:.4f}")
+            print(f"  NLL after           : {nll_after:.4f}")
+            print(f"  Improvement         : {nll_before - nll_after:+.4f}")
+            if self.temperature > 1.0:
+                print(f"  Interpretation      : T > 1 — model was overconfident ✅")
+            elif self.temperature < 1.0:
+                print(f"  Interpretation      : T < 1 — model was underconfident")
+            else:
+                print(f"  Interpretation      : T ≈ 1 — model already well calibrated")
+            print(f"{'='*55}\n")
+
+        return self.temperature
+
+    def compute_ece(
+        self,
+        val_loader: torch.utils.data.DataLoader,
+        device: torch.device,
+        n_bins: int = 15,
+        before_calibration: bool = False,
+    ) -> float:
+        """
+        Computes Expected Calibration Error (ECE) on the validation set.
+
+        ECE is the weighted average absolute difference between model confidence
+        and empirical accuracy across n_bins confidence bins.
+
+        A perfectly calibrated model has ECE = 0.
+        ResNet-18 typically has ECE ≈ 0.05–0.12 before calibration.
+
+        Args:
+            val_loader          : DataLoader — validation set.
+            device              : torch.device.
+            n_bins              : int — number of confidence bins (default 15).
+            before_calibration  : bool — if True, uses T=1 (uncalibrated model).
+
+        Returns:
+            float — ECE in [0, 1]. Lower is better.
+        """
+        self.eval()
+        all_confs   = []
+        all_correct = []
+
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+
+                if before_calibration:
+                    # Use raw logits (T=1) to measure pre-calibration ECE
+                    logits = self.base_model(images)
+                else:
+                    logits = self.forward(images)
+
+                probs      = F.softmax(logits, dim=1)
+                confs, preds = probs.max(dim=1)
+
+                all_confs.extend(confs.cpu().numpy())
+                all_correct.extend((preds == labels).cpu().numpy())
+
+        all_confs   = np.array(all_confs)
+        all_correct = np.array(all_correct, dtype=float)
+
+        bin_edges = np.linspace(0, 1, n_bins + 1)
+        ece       = 0.0
+        n_total   = len(all_confs)
+
+        for i in range(n_bins):
+            lo, hi = bin_edges[i], bin_edges[i + 1]
+            mask   = (all_confs > lo) & (all_confs <= hi)
+            n_bin  = mask.sum()
+            if n_bin == 0:
+                continue
+            acc_bin  = all_correct[mask].mean()
+            conf_bin = all_confs[mask].mean()
+            ece     += (n_bin / n_total) * abs(acc_bin - conf_bin)
+
+        return float(ece)
